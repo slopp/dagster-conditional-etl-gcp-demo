@@ -1,0 +1,7 @@
+dbt_project:
+  target: LOCAL
+  outputs:
+    LOCAL: 
+      type: duckdb
+      path: ../example.duckdb
+      schema: vehicles
