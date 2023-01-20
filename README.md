@@ -20,14 +20,15 @@ The run for `data/bad_parts.csv` will fail the data checks. As a result, the dat
 
 
 
-Project TODOs:
+## Project TODOs:  
 
 *Local*
 - [x] write an asset that represents data from plants for a vehicle manufacturer
 - [x] write sensor to watch for new files in a local directory 
 - [x] add dbt to create a monthly summary table from the raw data
-- [x] make the asset conditional based on a schema check (using graph-backed asset)
-*Production on GCP*
+- [x] make the asset conditional based on a schema check (using graph-backed asset)  
+
+*Production on GCP*  
 - [ ] write a GCP resource that can authenticate GCP clients from an env var by deserializing a service account auth json file
 - [ ] write a resource the sensor can use to list a GCP bucket instead of file system
 - [ ] write a resource the asset ops can use to read a GCP file 
