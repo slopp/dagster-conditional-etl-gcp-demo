@@ -1,47 +1,119 @@
-from dagster import Definitions, asset, sensor, define_asset_job, SkipReason, RunRequest, build_resources, AssetSelection
-from dagster._config.structured_config import Config
-import pandas as pd
-from dagster_duckdb_pandas import  duckdb_pandas_io_manager
-from .resources import FileReader, DirectoryLister
 import ast
-from dagster_dbt import load_assets_from_dbt_project, dbt_cli_resource
+
+import pandas as pd
+from dagster import (
+    AssetKey,
+    AssetsDefinition,
+    AssetSelection,
+    Definitions,
+    GraphOut,
+    Out,
+    Output,
+    RunRequest,
+    SkipReason,
+    asset,
+    build_resources,
+    define_asset_job,
+    fs_io_manager,
+    graph,
+    op,
+    sensor,
+)
+from dagster._config.structured_config import Config
+from dagster_dbt import dbt_cli_resource, load_assets_from_dbt_project
+from dagster_duckdb_pandas import duckdb_pandas_io_manager
+from pandera import Check, Column, DataFrameSchema
+from pandera.errors import SchemaError
+
+from .resources import DirectoryLister, FileReader
 
 # --- Resources
-duckdb = duckdb_pandas_io_manager.configured({
-    "database": "example.duckdb"
-})
+duckdb = duckdb_pandas_io_manager.configured({"database": "example.duckdb"})
 
 
 # --- Assets
 
+
 class PlantDataConfig(Config):
     file: str
 
-@asset(
-    io_manager_key="warehouse_io_manager",
-    key_prefix=["vehicles"],
-    group_name="vehicles"
+
+# @asset(
+#     io_manager_key="warehouse_io_manager",
+#     key_prefix=["vehicles"],
+#     group_name="vehicles"
+# )
+# def plant_data(config: PlantDataConfig, file_reader: FileReader):
+#     data = file_reader.read(config.file)
+#     return data
+
+PlantDataSchema = DataFrameSchema(
+    {
+        "plant": Column(str),
+        "date": Column(str),
+        "part_number": Column(int, Check(lambda s: s < 10)),
+        "quantity": Column(int),
+    }
 )
-def plant_data(config: PlantDataConfig, file_reader: FileReader):
+
+
+@op(
+    out={
+        "plant_data_good": Out(is_required=False),
+        "plant_data_bad": Out(is_required=False),
+    }
+)
+def plant_data_conditional(context, config: PlantDataConfig, file_reader: FileReader):
     data = file_reader.read(config.file)
+    try:
+        PlantDataSchema.validate(data)
+        yield Output(
+            data, "plant_data_good", metadata={"schema_check": "Passed Validation"}
+        )
+    except SchemaError as e:
+        context.log.warn("Plant data failed schema check!")
+        yield Output(
+            data, "plant_data_bad", metadata={"schema_check": f"Failed with {str(e)}"}
+        )
+
+
+@op(out=Out(io_manager_key="failure_io"))
+def plant_data_bad_op(data):
     return data
 
+
+@op(out=Out(io_manager_key="warehouse_io_manager"))
+def plant_data_good_op(data):
+    return data
+
+
+@graph(out={"plant_data": GraphOut(), "failed_plant_data": GraphOut()})
+def plant_data_graph():
+    plant_data_good, plant_data_bad = plant_data_conditional()
+    return {
+        "plant_data": plant_data_good_op(plant_data_good),
+        "failed_plant_data": plant_data_bad_op(plant_data_bad),
+    }
+
+
+plant_data = AssetsDefinition.from_graph(
+    plant_data_graph, key_prefix="vehicles", group_name="raw_data"
+)
+
 dbt_assets = load_assets_from_dbt_project(
-    project_dir="dbt_project",
-    profiles_dir="dbt_project/config"
+    project_dir="dbt_project", profiles_dir="dbt_project/config"
 )
 
-# --- Jobs 
+# --- Jobs
 asset_job = define_asset_job(
-    name = "new_plant_data_job",
-    selection = AssetSelection.all(),    
+    name="new_plant_data_job",
+    selection=AssetSelection.all(),
 )
 
-# --- Sensors 
+# --- Sensors
 
-@sensor(
-    job = asset_job
-)
+
+@sensor(job=asset_job)
 def watch_for_new_plant_data(context):
     with build_resources({"ls": DirectoryLister()}) as resources:
 
@@ -55,19 +127,39 @@ def watch_for_new_plant_data(context):
 
         if len(new_files) == 0:
             return SkipReason("No new files to process")
-        
-        run_requests = [RunRequest(run_key = file, run_config={"ops": {"vehicles__plant_data": {"config": {"file": f"data/{file}" }}}}) for file in new_files]
+
+        run_requests = [
+            RunRequest(
+                run_key=file,
+                run_config={
+                    "ops": {
+                        "plant_data_graph": {
+                            "ops": {
+                                "plant_data_conditional": {
+                                    "config": {"file": f"data/{file}"}
+                                }
+                            }
+                        }
+                    }
+                },
+            )
+            for file in new_files
+        ]
         context.update_cursor(str(files))
-        return run_requests   
+        return run_requests
+
 
 defs = Definitions(
-    assets = [plant_data, *dbt_assets],
-    resources = {
+    assets=[plant_data, *dbt_assets],
+    resources={
         "file_reader": FileReader(),
-        "warehouse_io_manager": duckdb, 
+        "warehouse_io_manager": duckdb,
         "ls": DirectoryLister(),
-        "dbt": dbt_cli_resource.configured({"project_dir": "dbt_project", "profiles_dir": "dbt_project/config"})
+        "dbt": dbt_cli_resource.configured(
+            {"project_dir": "dbt_project", "profiles_dir": "dbt_project/config"}
+        ),
+        "failure_io": fs_io_manager,
     },
     jobs=[asset_job],
-    sensors=[watch_for_new_plant_data]
+    sensors=[watch_for_new_plant_data],
 )
