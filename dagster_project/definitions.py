@@ -33,11 +33,7 @@ duckdb = duckdb_pandas_io_manager.configured({"database": "example.duckdb"})
 
 # --- Assets
 
-
-class PlantDataConfig(Config):
-    file: str
-
-
+# ORIGINAL ASSET WITHOUT BRANCHING
 # @asset(
 #     io_manager_key="warehouse_io_manager",
 #     key_prefix=["vehicles"],
@@ -47,6 +43,7 @@ class PlantDataConfig(Config):
 #     data = file_reader.read(config.file)
 #     return data
 
+# BEGIN CONDITIONAL BRANCHING ASSET
 PlantDataSchema = DataFrameSchema(
     {
         "plant": Column(str),
@@ -55,6 +52,9 @@ PlantDataSchema = DataFrameSchema(
         "quantity": Column(int),
     }
 )
+
+class PlantDataConfig(Config):
+    file: str
 
 
 @op(
@@ -99,6 +99,7 @@ def plant_data_graph():
 plant_data = AssetsDefinition.from_graph(
     plant_data_graph, key_prefix="vehicles", group_name="raw_data"
 )
+# END CONDITIONAL BRANCHING ASSET
 
 dbt_assets = load_assets_from_dbt_project(
     project_dir="dbt_project", profiles_dir="dbt_project/config"
@@ -111,8 +112,6 @@ asset_job = define_asset_job(
 )
 
 # --- Sensors
-
-
 @sensor(job=asset_job)
 def watch_for_new_plant_data(context):
     with build_resources({"ls": DirectoryLister()}) as resources:
