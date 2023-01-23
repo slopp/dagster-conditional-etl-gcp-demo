@@ -13,11 +13,13 @@ if __name__ == "__main__":
             "scipy",
             "dbt-core",
             "dbt-duckdb",
-            "dbt-snowflake", 
+            "dbt-bigquery",
             "dagster-duckdb",
             "dagster-duckdb-pandas",
             "dagster-cloud", 
-            "requests"
+            "requests",
+            "gcsfs",
+            "google.oauth2"
         ],
         extras_require={"dev": ["dagit", "pytest"]},
     )

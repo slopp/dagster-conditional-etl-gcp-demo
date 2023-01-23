@@ -2,5 +2,9 @@ version: 2
 
 sources:
   - name: "vehicles"
+    schema: |
+      {%- if  target.name == "GCP" -%} hooli
+      {%- else -%} vehicles
+      {%- endif -%}
     tables:
     - name: "plant_data"

@@ -28,13 +28,31 @@ from dagster_duckdb_pandas import duckdb_pandas_io_manager
 from pandera import Check, Column, DataFrameSchema
 from pandera.errors import SchemaError
 
-from .resources import DirectoryLister, FileReader
+from .resources import DirectoryLister, FileReader, GCPAuth, GCPFileReader, GCPFileWriter
+
+import os
 
 # --- Resources
 duckdb = duckdb_pandas_io_manager.configured({"database": "example.duckdb"})
 
 def get_env():
     return "LOCAL"
+
+gcp_auth = GCPAuth(
+  type="service_account",
+  project_id= os.getenv('GCP_PROJECT_ID'),
+  private_key_id= os.getenv("GCP_SA_PRIVATE_KEY_ID"),
+  private_key=os.getenv("GCP_SA_PRIVATE_KEY"),
+  client_email=os.getenv("GCP_SA_CLIENT_EMAIL"),
+  client_id=os.getenv("GCP_SA_CLIENT_ID"),
+  auth_uri="https://accounts.google.com/o/oauth2/auth",
+  token_uri="https://oauth2.googleapis.com/token",
+  auth_provider_x509_cert_url="https://www.googleapis.com/oauth2/v1/certs",
+  client_x509_cert_url=os.getenv("GCP_SA_CLIENT_CERT")
+)
+
+gcp_file_reader = GCPFileReader(auth=gcp_auth)
+gcp_file_writer = GCPFileWriter(auth=gcp_auth)
 
 resources = {
     "LOCAL":  {
@@ -48,13 +66,14 @@ resources = {
     },
 
     "GCP": {
-        "file_reader": FileReader(),
+        "file_reader": gcp_file_reader,
         "warehouse_io_manager": duckdb,
         "ls": DirectoryLister(),
         "dbt": dbt_cli_resource.configured(
             {"project_dir": "dbt_project", "profiles_dir": "dbt_project/config", "target": "GCP"}
         ),
-        "failure_io": fs_io_manager,
+        "failure_io": gcp_file_writer,
+        "gcp_auth": gcp_auth
     }
 }
    
@@ -79,7 +98,7 @@ class PlantDataConfig(Config):
     key_prefix=["vehicles"],
     group_name="vehicles"
 )
-def plant_data(config: PlantDataConfig, file_reader: FileReader):
+def plant_data(config: PlantDataConfig, file_reader: GCPFileReader):
     data = file_reader.read(config.file)
     return data
 
@@ -90,7 +109,7 @@ def plant_data(config: PlantDataConfig, file_reader: FileReader):
         "plant_data_bad": AssetOut(is_required=False, io_manager_key="failure_io", group_name="branching"),
     }
 )
-def plant_data_conditional(context, config: PlantDataConfig, file_reader: FileReader):
+def plant_data_conditional(context, config: PlantDataConfig, file_reader: GCPFileReader):
     data = file_reader.read(config.file)
     try:
         PlantDataSchema.validate(data)
