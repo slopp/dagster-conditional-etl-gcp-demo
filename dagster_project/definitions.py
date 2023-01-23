@@ -18,6 +18,8 @@ from dagster import (
     graph,
     op,
     sensor,
+    multi_asset,
+    AssetOut
 )
 from dagster._config.structured_config import Config
 from dagster_dbt import dbt_cli_resource, load_assets_from_dbt_project
@@ -30,20 +32,34 @@ from .resources import DirectoryLister, FileReader
 # --- Resources
 duckdb = duckdb_pandas_io_manager.configured({"database": "example.duckdb"})
 
+def get_env():
+    return "GCP"
+
+resources = {
+    "LOCAL":  {
+        "file_reader": FileReader(),
+        "warehouse_io_manager": duckdb,
+        "ls": DirectoryLister(),
+        "dbt": dbt_cli_resource.configured(
+            {"project_dir": "dbt_project", "profiles_dir": "dbt_project/config"}
+        ),
+        "failure_io": fs_io_manager,
+    },
+
+    "GCP": {
+        "file_reader": FileReader(),
+        "warehouse_io_manager": duckdb,
+        "ls": DirectoryLister(),
+        "dbt": dbt_cli_resource.configured(
+            {"project_dir": "dbt_project", "profiles_dir": "dbt_project/config", "target": "GCP"}
+        ),
+        "failure_io": fs_io_manager,
+    }
+}
+   
 
 # --- Assets
 
-# ORIGINAL ASSET WITHOUT BRANCHING
-# @asset(
-#     io_manager_key="warehouse_io_manager",
-#     key_prefix=["vehicles"],
-#     group_name="vehicles"
-# )
-# def plant_data(config: PlantDataConfig, file_reader: FileReader):
-#     data = file_reader.read(config.file)
-#     return data
-
-# BEGIN CONDITIONAL BRANCHING ASSET
 PlantDataSchema = DataFrameSchema(
     {
         "plant": Column(str),
@@ -56,50 +72,32 @@ PlantDataSchema = DataFrameSchema(
 class PlantDataConfig(Config):
     file: str
 
+# OPTION 1: ASSET WITHOUT BRANCHING
+@asset(
+    io_manager_key="warehouse_io_manager",
+    key_prefix=["vehicles"],
+    group_name="vehicles"
+)
+def plant_data(config: PlantDataConfig, file_reader: FileReader):
+    data = file_reader.read(config.file)
+    return data
 
-@op(
-    out={
-        "plant_data_good": Out(is_required=False),
-        "plant_data_bad": Out(is_required=False),
+# OPTION 2: CONDITIONAL BRANCHING ASSET
+@multi_asset(
+    outs={
+        "plant_data_good": AssetOut(is_required=False, io_manager_key="warehouse_io_manager"),
+        "plant_data_bad": AssetOut(is_required=False, io_manager_key="failure_io"),
     }
 )
 def plant_data_conditional(context, config: PlantDataConfig, file_reader: FileReader):
     data = file_reader.read(config.file)
     try:
         PlantDataSchema.validate(data)
-        yield Output(
-            data, "plant_data_good", metadata={"schema_check": "Passed Validation"}
-        )
+        yield Output(data, "plant_data_good", metadata={"schema_check": "Passed Validation"} )
     except SchemaError as e:
         context.log.warn("Plant data failed schema check!")
-        yield Output(
-            data, "plant_data_bad", metadata={"schema_check": f"Failed with {str(e)}"}
-        )
+        yield Output(data, "plant_data_bad", metadata={"schema_check": f"Failed Validation with {str(e)}"})
 
-
-@op(out=Out(io_manager_key="failure_io"))
-def plant_data_bad_op(data):
-    return data
-
-
-@op(out=Out(io_manager_key="warehouse_io_manager"))
-def plant_data_good_op(data):
-    return data
-
-
-@graph(out={"plant_data": GraphOut(), "failed_plant_data": GraphOut()})
-def plant_data_graph():
-    plant_data_good, plant_data_bad = plant_data_conditional()
-    return {
-        "plant_data": plant_data_good_op(plant_data_good),
-        "failed_plant_data": plant_data_bad_op(plant_data_bad),
-    }
-
-
-plant_data = AssetsDefinition.from_graph(
-    plant_data_graph, key_prefix="vehicles", group_name="raw_data"
-)
-# END CONDITIONAL BRANCHING ASSET
 
 dbt_assets = load_assets_from_dbt_project(
     project_dir="dbt_project", profiles_dir="dbt_project/config"
@@ -108,57 +106,45 @@ dbt_assets = load_assets_from_dbt_project(
 # --- Jobs
 asset_job = define_asset_job(
     name="new_plant_data_job",
-    selection=AssetSelection.all(),
+    selection=AssetSelection.all() - AssetSelection.assets(plant_data),
 )
 
 # --- Sensors
 @sensor(job=asset_job)
 def watch_for_new_plant_data(context):
-    with build_resources({"ls": DirectoryLister()}) as resources:
 
-        cursor = context.cursor or None
-        already_seen = set()
-        if cursor is not None:
-            already_seen = set(ast.literal_eval(cursor))
+    ls = DirectoryLister()
+    cursor = context.cursor or None
+    already_seen = set()
+    if cursor is not None:
+        already_seen = set(ast.literal_eval(cursor))
 
-        files = set(resources.ls.list("data"))
-        new_files = files - already_seen
+    files = set(ls.list("data"))
+    new_files = files - already_seen
 
-        if len(new_files) == 0:
-            return SkipReason("No new files to process")
+    if len(new_files) == 0:
+        return SkipReason("No new files to process")
 
-        run_requests = [
-            RunRequest(
-                run_key=file,
-                run_config={
-                    "ops": {
-                        "plant_data_graph": {
-                            "ops": {
-                                "plant_data_conditional": {
-                                    "config": {"file": f"data/{file}"}
-                                }
+    run_requests = [
+        RunRequest(
+            run_key=file,
+            run_config={
+                "ops": {
+                     "plant_data_conditional": {
+                                "config": {"file": f"data/{file}"}
                             }
-                        }
                     }
-                },
-            )
-            for file in new_files
-        ]
-        context.update_cursor(str(files))
-        return run_requests
+                }
+        )
+        for file in new_files
+    ]
+    context.update_cursor(str(files))
+    return run_requests
 
 
 defs = Definitions(
-    assets=[plant_data, *dbt_assets],
-    resources={
-        "file_reader": FileReader(),
-        "warehouse_io_manager": duckdb,
-        "ls": DirectoryLister(),
-        "dbt": dbt_cli_resource.configured(
-            {"project_dir": "dbt_project", "profiles_dir": "dbt_project/config"}
-        ),
-        "failure_io": fs_io_manager,
-    },
+    assets=[plant_data_conditional, plant_data, *dbt_assets],
+    resources=resources[get_env()],
     jobs=[asset_job],
     sensors=[watch_for_new_plant_data],
 )
