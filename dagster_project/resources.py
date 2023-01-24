@@ -3,6 +3,7 @@ import os
 import pandas as pd
 from dagster._config.structured_config import Resource, StructuredConfigIOManager
 from google.oauth2 import service_account
+import pandas_gbq
 
 class FileReader(Resource):
     def read(self, file) -> pd.DataFrame:
@@ -46,3 +47,12 @@ class GCPFileWriter(StructuredConfigIOManager):
     
     def load_input(self, context):
         pass
+
+
+class BQIOManager(StructuredConfigIOManager):
+    auth: GCPAuth
+    def handle_output(self, context, obj) -> None:
+        return 
+
+    def load_input(self, context) -> pd.DataFrame:
+        return 
