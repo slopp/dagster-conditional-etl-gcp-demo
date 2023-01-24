@@ -19,7 +19,8 @@ from dagster import (
     op,
     sensor,
     multi_asset,
-    AssetOut
+    AssetOut,
+    DailyPartitionsDefinition
 )
 from dagster._config.structured_config import Config
 from dagster_dbt import dbt_cli_resource, load_assets_from_dbt_project
@@ -33,7 +34,7 @@ from .resources import DirectoryLister, FileReader
 duckdb = duckdb_pandas_io_manager.configured({"database": "example.duckdb"})
 
 def get_env():
-    return "GCP"
+    return "LOCAL"
 
 resources = {
     "LOCAL":  {
@@ -85,8 +86,8 @@ def plant_data(config: PlantDataConfig, file_reader: FileReader):
 # OPTION 2: CONDITIONAL BRANCHING ASSET
 @multi_asset(
     outs={
-        "plant_data_good": AssetOut(is_required=False, io_manager_key="warehouse_io_manager"),
-        "plant_data_bad": AssetOut(is_required=False, io_manager_key="failure_io"),
+        "plant_data_good": AssetOut(is_required=False, io_manager_key="warehouse_io_manager", group_name="branching"),
+        "plant_data_bad": AssetOut(is_required=False, io_manager_key="failure_io", group_name="branching"),
     }
 )
 def plant_data_conditional(context, config: PlantDataConfig, file_reader: FileReader):
@@ -102,6 +103,25 @@ def plant_data_conditional(context, config: PlantDataConfig, file_reader: FileRe
 dbt_assets = load_assets_from_dbt_project(
     project_dir="dbt_project", profiles_dir="dbt_project/config"
 )
+
+# OPTION 3: PARTITIONS
+@asset(
+    partitions_def=DailyPartitionsDefinition(start_date="2023-01-20"),
+    io_manager_key="warehouse_io_manager",
+    metadata={'partition_expr': 'date'},
+    key_prefix=["vehicles"],
+    group_name="partitions"
+)
+def plant_data_partitioned(context, file_reader: FileReader): 
+    partition =  context.asset_partition_key_for_output()
+    if partition == "2023-01-20":
+        file = "parts.csv"
+    elif partition == "2023-01-22":
+        file = "bad_parts.csv"
+    else:
+        file = None
+    data = file_reader.read(file)
+    return data
 
 # --- Jobs
 asset_job = define_asset_job(
@@ -143,7 +163,7 @@ def watch_for_new_plant_data(context):
 
 
 defs = Definitions(
-    assets=[plant_data_conditional, plant_data, *dbt_assets],
+    assets=[plant_data_conditional, plant_data, plant_data_partitioned, *dbt_assets],
     resources=resources[get_env()],
     jobs=[asset_job],
     sensors=[watch_for_new_plant_data],
