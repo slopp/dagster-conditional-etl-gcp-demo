@@ -36,7 +36,7 @@ import os
 duckdb = duckdb_pandas_io_manager.configured({"database": "example.duckdb"})
 
 def get_env():
-    return "LOCAL"
+    return "GCP"
 
 gcp_auth = GCPAuth(
   type="service_account",
@@ -98,7 +98,7 @@ class PlantDataConfig(Config):
     key_prefix=["vehicles"],
     group_name="vehicles"
 )
-def plant_data(config: PlantDataConfig, file_reader: GCPFileReader):
+def plant_data(config: PlantDataConfig, file_reader: FileReader):
     data = file_reader.read(config.file)
     return data
 
@@ -109,7 +109,7 @@ def plant_data(config: PlantDataConfig, file_reader: GCPFileReader):
         "plant_data_bad": AssetOut(is_required=False, io_manager_key="failure_io", group_name="branching"),
     }
 )
-def plant_data_conditional(context, config: PlantDataConfig, file_reader: GCPFileReader):
+def plant_data_conditional(context, config: PlantDataConfig, file_reader: FileReader):
     data = file_reader.read(config.file)
     try:
         PlantDataSchema.validate(data)

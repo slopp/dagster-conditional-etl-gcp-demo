@@ -29,7 +29,7 @@ class GCPAuth(Resource):
     
 
 
-class GCPFileReader(Resource):
+class GCPFileReader(FileReader):
     auth: GCPAuth
     def read(self, file) -> pd.DataFrame:
         token = self.auth.dict(include={'type', 'project_id', 'private_key_id','private_key','client_email','client_id','auth_uri','token_uri','auth_provider_x509_cert_url','client_x509_cert_url'})
