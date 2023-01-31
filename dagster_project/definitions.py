@@ -41,7 +41,7 @@ def get_env():
         with open(AUTH_FILE, "w") as f:
             json.dump(json.loads(base64.b64decode(os.getenv("GCP_CREDS_JSON_CREDS_BASE64"))), f)
 
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = AUTH_FILE
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.abspath(AUTH_FILE)
 
         return "GCP"
 
@@ -62,7 +62,7 @@ resources = {
     "GCP": {
         "file_reader": GCPFileReader(bucket="gcs://hooli-demo"),
         "error_writer": GCPErrorWriter(bucket="gcs://hooli-demo", folder="failed"),
-        "warehouse_io_manager": BQIOManager(dataset="hooli"),
+        "warehouse_io_manager": BQIOManager(dataset=os.getenv("GCP_BQ_DATASET")),
         "dbt": dbt_cli_resource.configured(
             {
                 "project_dir": "dbt_project",

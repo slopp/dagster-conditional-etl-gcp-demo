@@ -54,6 +54,8 @@ To use Google Cloud:
 - [ ] Create a BigQuery dataset
 - [ ] Follow the insructions in *Setup GCP Auth*
 - [ ] Edit `definitions.py` to supply the appropriate configuration to the resources in `definitions.py`
+- [ ] Set the environment variables `GCP_BQ_PROJECT` and `GCP_BQ_DATASET` which are used by dbt in `dbt_project/config/profiles.yaml`
+
 - [ ] Set the environment variable `export USE_GCP="True"`
 
 > Dev Note: This project uses pydantic for resource configuration, a capability introduced in Dagster 1.1

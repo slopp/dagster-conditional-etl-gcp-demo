@@ -6,20 +6,9 @@ dbt_project:
       path: ../example.duckdb
       schema: vehicles
     GCP:
-      dataset: hooli
-      method: service-account-json
-      project: "{{ env_var('GCP_PROJECT_ID') }}"
+      dataset: "{{ env_var('GCP_BQ_DATASET') }}"
+      project: "{{ env_var('GCP_BQ_PROJECT') }}"
+      method: service-account
       threads: 1
       type: bigquery
-      keyfile_json: #"/Users/lopp/Projects/dagster-conditional-etl-gcp-demo/elementl-dev-550125c5e664.json"
-        type: service_account
-        project_id: "{{ env_var('GCP_PROJECT_ID') }}"
-        private_key_id: "{{ env_var('GCP_SA_PRIVATE_KEY_ID') }}"
-        # https://github.com/dbt-labs/dbt-core/issues/3044#issuecomment-770853855
-        private_key: "{{ env_var('GCP_SA_PRIVATE_KEY') }}"
-        client_email: "{{ env_var('GCP_SA_CLIENT_EMAIL') }}"
-        client_id: "{{ env_var('GCP_SA_CLIENT_ID') }}"
-        auth_uri: "https://accounts.google.com/o/oauth2/auth"
-        token_uri: "https://accounts.google.com/o/oauth2/token"
-        auth_provider_x509_cert_url: "https://www.googleapis.com/oauth2/v1/certs"
-        client_x509_cert_url: "{{ env_var('GCP_SA_CLIENT_CERT') }}"
+      keyfile: "{{ env_var('GOOGLE_APPLICATION_CREDENTIALS') }}"

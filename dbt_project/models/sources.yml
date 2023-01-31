@@ -3,7 +3,7 @@ version: 2
 sources:
   - name: "vehicles"
     schema: |
-      {%- if  target.name == "GCP" -%} hooli
+      {%- if  target.name == "GCP" -%} {{ env_var('GCP_BQ_DATASET') }}
       {%- else -%} vehicles
       {%- endif -%}
     tables:
