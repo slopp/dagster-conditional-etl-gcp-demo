@@ -56,10 +56,6 @@ When failures do occur, side affects can still occur such as alerting the team o
 
 ![](handling_failure.png)
 
-New files can trigger runs automatically using sensors.
-
-![](sensor.png)
-
 Finally, Dagster assets support a resource abstraction. Resources allow the code responsible for loading and storing data to be decoupled from the pipeline code. Decoupling resources enables different resources to be used for local testing vs production runs.
 
 ## Use resources
