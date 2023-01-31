@@ -1,0 +1,4 @@
+locations:
+  - location_name: conditional_etl_gcp
+    code_source:
+      package_name: dagster_project
