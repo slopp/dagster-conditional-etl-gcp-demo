@@ -7,6 +7,7 @@ if __name__ == "__main__":
         package_data={"dagster_project": ["dbt_project/*"]},
         install_requires=[
             "dagster",
+            "dagster-cloud",
             "dagster-dbt",
             "pandas",
             "pandas-gbq",
