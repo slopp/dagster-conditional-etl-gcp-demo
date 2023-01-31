@@ -34,7 +34,7 @@ In an task-based orchestrator the pipeline is represented as a series of complex
 - Fourth, if the data meets expectations, write the data to a success location 
 - Fifth, if the data met expectations, run a transformation pipeline   
 
-![]("tasks.png")
+![](tasks.png)
 
 This task-based specification is verbose and makes debugging challenging. In order to understand the state of the dataset you have to inspect the logs for each run and determine which path was taken. 
 
@@ -44,21 +44,21 @@ In Dagster, assets allow the pipeline to be represented in terms of the outputs:
 - The transformed dataset  
 - The cleaned summary dataset 
 
-![]("assets.png")
+![](assets.png)
 
 Lineage between the upstream and downstream assets is obvious. The code responsible for creating the raw dataset can still have conditional behavior. However, unlike the task-based approach, the result of the conditional logic is represented immediately in the state of the asset. Teams can see what partitions of the asset are successful as well as which partitions are missing. 
 
-![]("asset_view.png")
+![](asset_view.png)
 
 When failures do occur, side affects can still occur such as alerting the team or writing the failed data to a separate queue.
 
-![]("runs.png")
+![](runs.png)
 
-![]("handling_failure.png)
+![](handling_failure.png)
 
 New files can trigger runs automatically using sensors.
 
-![]("sensor.png")
+![](sensor.png)
 
 Finally, Dagster assets support a resource abstraction. Resources allow the code responsible for loading and storing data to be decoupled from the pipeline code. Decoupling resources enables different resources to be used for local testing vs production runs.
 
