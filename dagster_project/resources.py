@@ -1,58 +1,91 @@
 import os
+from typing import Optional
 
 import pandas as pd
-from dagster._config.structured_config import Resource, StructuredConfigIOManager
-from google.oauth2 import service_account
 import pandas_gbq
+from dagster._config.structured_config import Resource, StructuredConfigIOManager
+from google.cloud import storage
+
 
 class FileReader(Resource):
+    """Reads CSVs from a specific folder"""
+
+    directory: Optional[str]
+
     def read(self, file) -> pd.DataFrame:
-        return pd.read_csv(file)
+        return pd.read_csv(f"{self.directory}/{file}")
+
+
+class ErrorWriter(Resource):
+    """Writes failed dataframes to a specific folder"""
+
+    directory: Optional[str]
+
+    def write(self, obj: pd.DataFrame, file: str):
+        return obj.to_csv(f"{self.directory}/{file}")
 
 
 class DirectoryLister(Resource):
-    def list(self, dir):
-        return os.listdir(dir)
+    """Lists files in a directory"""
 
+    directory: Optional[str]
 
-class GCPAuth(Resource):
-    type: str
-    project_id: str
-    private_key_id: str
-    private_key: str
-    client_email: str
-    client_id: str
-    auth_uri: str
-    token_uri: str
-    auth_provider_x509_cert_url: str
-    client_x509_cert_url: str
-    
+    def list(self):
+        return os.listdir(self.directory)
 
 
 class GCPFileReader(FileReader):
-    auth: GCPAuth
-    def read(self, file) -> pd.DataFrame:
-        token = self.auth.dict(include={'type', 'project_id', 'private_key_id','private_key','client_email','client_id','auth_uri','token_uri','auth_provider_x509_cert_url','client_x509_cert_url'})
-        credentials = service_account.Credentials.from_service_account_info(token, scopes=['https://www.googleapis.com/auth/cloud-platform', 'https://www.googleapis.com/auth/devstorage.read_write'])
-        return pd.read_csv(f"gcs://hooli-demo/{file}", storage_options = {'token': credentials})
+    """Reads CSVs from a GCS bucket"""
 
-class GCPFileWriter(StructuredConfigIOManager):
-    auth: GCPAuth
-    def handle_output(self, context, obj) -> None:
-        file = f"{context.run_id}-{context.asset_key[0]}.csv"
-        token = self.auth.dict(include={'type', 'project_id', 'private_key_id','private_key','client_email','client_id','auth_uri','token_uri','auth_provider_x509_cert_url','client_x509_cert_url'})
-        credentials = service_account.Credentials.from_service_account_info(token, scopes=['https://www.googleapis.com/auth/cloud-platform', 'https://www.googleapis.com/auth/devstorage.read_write'])
-        obj.to_csv(f"gcs://hooli-demo/{file}", storage_options = {'token': credentials})
-        return 
-    
-    def load_input(self, context):
-        pass
+    bucket: str
+
+    def read(self, file) -> pd.DataFrame:
+        return pd.read_csv(f"{self.bucket}/{file}")
+
+
+class GCPErrorWriter(ErrorWriter):
+    """Writes failed dataframes to a GCS bucket in a specific folder"""
+
+    bucket: str
+    folder: str
+
+    def write(self, obj: pd.DataFrame, file: str):
+        obj.to_csv(f"{self.bucket}/{self.folder}/{file}")
+        return
+
+
+class GCPDirectoryLister(DirectoryLister):
+    """Lists blobs in a GCS bucket except any files in an ignored folder"""
+
+    bucket: str
+    ignore_folder: str
+
+    def list(self):
+        storage_client = storage.Client()
+        blobs = storage_client.list_blobs(self.bucket)
+        files = []
+        for blob in blobs:
+            if self.ignore_folder in blob.name:
+                continue
+            files.append(blob.name)
+        return files
 
 
 class BQIOManager(StructuredConfigIOManager):
-    auth: GCPAuth
-    def handle_output(self, context, obj) -> None:
-        return 
+    """An IO Manager that appends dataframes to a table named by the asset key."""
+
+    dataset: str
+
+    def handle_output(self, context, obj: pd.DataFrame) -> None:
+        dataset_table = f"{self.dataset}.{context.asset_key.path[-1]}"
+        pandas_gbq.to_gbq(obj, dataset_table, if_exists="append")
+
+        context.add_output_metadata(
+            {"sql": f"SELECT * FROM {dataset_table}", "nrow": len(obj)}
+        )
+
+        return
 
     def load_input(self, context) -> pd.DataFrame:
-        return 
+        # TODO
+        pass

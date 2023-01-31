@@ -9,6 +9,8 @@ if __name__ == "__main__":
             "dagster",
             "dagster-dbt",
             "pandas",
+            "pandas-gbq",
+            "pandera",
             "numpy",
             "scipy",
             "dbt-core",
@@ -19,7 +21,7 @@ if __name__ == "__main__":
             "dagster-cloud", 
             "requests",
             "gcsfs",
-            "google.oauth2"
+            "google-cloud"
         ],
         extras_require={"dev": ["dagit", "pytest"]},
     )

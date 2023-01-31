@@ -1,179 +1,159 @@
 import ast
+import base64
+import json
+import os
 
-import pandas as pd
 from dagster import (
-    AssetKey,
-    AssetsDefinition,
     AssetSelection,
+    DailyPartitionsDefinition,
     Definitions,
-    GraphOut,
-    Out,
-    Output,
-    RunRequest,
     SkipReason,
     asset,
-    build_resources,
     define_asset_job,
-    fs_io_manager,
-    graph,
-    op,
     sensor,
-    multi_asset,
-    AssetOut,
-    DailyPartitionsDefinition
 )
-from dagster._config.structured_config import Config
 from dagster_dbt import dbt_cli_resource, load_assets_from_dbt_project
 from dagster_duckdb_pandas import duckdb_pandas_io_manager
 from pandera import Check, Column, DataFrameSchema
 from pandera.errors import SchemaError
 
-from .resources import DirectoryLister, FileReader, GCPAuth, GCPFileReader, GCPFileWriter
-
-import os
-
-# --- Resources
-duckdb = duckdb_pandas_io_manager.configured({"database": "example.duckdb"})
-
-def get_env():
-    return "GCP"
-
-gcp_auth = GCPAuth(
-  type="service_account",
-  project_id= os.getenv('GCP_PROJECT_ID'),
-  private_key_id= os.getenv("GCP_SA_PRIVATE_KEY_ID"),
-  private_key=os.getenv("GCP_SA_PRIVATE_KEY"),
-  client_email=os.getenv("GCP_SA_CLIENT_EMAIL"),
-  client_id=os.getenv("GCP_SA_CLIENT_ID"),
-  auth_uri="https://accounts.google.com/o/oauth2/auth",
-  token_uri="https://oauth2.googleapis.com/token",
-  auth_provider_x509_cert_url="https://www.googleapis.com/oauth2/v1/certs",
-  client_x509_cert_url=os.getenv("GCP_SA_CLIENT_CERT")
+from .resources import (
+    BQIOManager,
+    DirectoryLister,
+    ErrorWriter,
+    FileReader,
+    GCPDirectoryLister,
+    GCPErrorWriter,
+    GCPFileReader,
 )
 
-gcp_file_reader = GCPFileReader(auth=gcp_auth)
-gcp_file_writer = GCPFileWriter(auth=gcp_auth)
+# set to true to use GCP resources
+# requires GCP_CREDS_JSON_CREDS_BASE64 and 
+# potential resource configuration
+USE_GCP = os.getenv("USE_GCP", "False")
+
+
+# --- Resources
+def get_env():
+    """Determine resources based on where code is running"""
+    if USE_GCP == "True":
+        AUTH_FILE = "./gcp_creds.json"
+        with open(AUTH_FILE, "w") as f:
+            json.dump(json.loads(base64.b64decode(os.getenv("GCP_CREDS_JSON_CREDS_BASE64"))), f)
+
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = AUTH_FILE
+
+        return "GCP"
+
+    return "LOCAL"
+
 
 resources = {
-    "LOCAL":  {
-        "file_reader": FileReader(),
-        "warehouse_io_manager": duckdb,
-        "ls": DirectoryLister(),
+    "LOCAL": {
+        "file_reader": FileReader(directory="data"),
+        "error_writer": ErrorWriter(directory="failed"),
+        "warehouse_io_manager": duckdb_pandas_io_manager.configured(
+            {"database": "example.duckdb"}
+        ),
         "dbt": dbt_cli_resource.configured(
             {"project_dir": "dbt_project", "profiles_dir": "dbt_project/config"}
         ),
-        "failure_io": fs_io_manager,
     },
-
     "GCP": {
-        "file_reader": gcp_file_reader,
-        "warehouse_io_manager": duckdb,
-        "ls": DirectoryLister(),
+        "file_reader": GCPFileReader(bucket="gcs://hooli-demo"),
+        "error_writer": GCPErrorWriter(bucket="gcs://hooli-demo", folder="failed"),
+        "warehouse_io_manager": BQIOManager(dataset="hooli"),
         "dbt": dbt_cli_resource.configured(
-            {"project_dir": "dbt_project", "profiles_dir": "dbt_project/config", "target": "GCP"}
+            {
+                "project_dir": "dbt_project",
+                "profiles_dir": "dbt_project/config",
+                "target": "GCP",
+            }
         ),
-        "failure_io": gcp_file_writer,
-        "gcp_auth": gcp_auth
-    }
+    },
 }
-   
+
+sensor_resources = {
+    "LOCAL": DirectoryLister(directory="data"),
+    "GCP": GCPDirectoryLister(bucket="hooli-demo", ignore_folder="failed"),
+}
 
 # --- Assets
-
-PlantDataSchema = DataFrameSchema(
-    {
-        "plant": Column(str),
-        "date": Column(str),
-        "part_number": Column(int, Check(lambda s: s < 10)),
-        "quantity": Column(int),
-    }
-)
-
-class PlantDataConfig(Config):
-    file: str
-
-# OPTION 1: ASSET WITHOUT BRANCHING
 @asset(
     io_manager_key="warehouse_io_manager",
+    partitions_def=DailyPartitionsDefinition(start_date="2023-01-20"),
+    metadata={"partition_expr": "date"},
     key_prefix=["vehicles"],
-    group_name="vehicles"
+    group_name="vehicles",
 )
-def plant_data(config: PlantDataConfig, file_reader: FileReader):
-    data = file_reader.read(config.file)
-    return data
+def plant_data(context, file_reader: FileReader, error_writer: ErrorWriter):
+    """
+    Plant data that matches a schema requirement
 
-# OPTION 2: CONDITIONAL BRANCHING ASSET
-@multi_asset(
-    outs={
-        "plant_data_good": AssetOut(is_required=False, io_manager_key="warehouse_io_manager", group_name="branching"),
-        "plant_data_bad": AssetOut(is_required=False, io_manager_key="failure_io", group_name="branching"),
-    }
-)
-def plant_data_conditional(context, config: PlantDataConfig, file_reader: FileReader):
-    data = file_reader.read(config.file)
+    Raw data is read from directory, 1 file per day
+    These daily files are represented as partitions
+
+    If data fails the schema check the partition fails
+    which can trigger an alert and writes the bad data
+    to a failed location
+    """
+
+    PlantDataSchema = DataFrameSchema(
+        {
+            "plant": Column(str),
+            "date": Column(str),
+            "part_number": Column(int, Check(lambda s: s < 10)),
+            "quantity": Column(int),
+        }
+    )
+
+    file = f"{context.asset_partition_key_for_output()}.csv"
+    data = file_reader.read(file)
+
     try:
         PlantDataSchema.validate(data)
-        yield Output(data, "plant_data_good", metadata={"schema_check": "Passed Validation"} )
     except SchemaError as e:
-        context.log.warn("Plant data failed schema check!")
-        yield Output(data, "plant_data_bad", metadata={"schema_check": f"Failed Validation with {str(e)}"})
+        context.log.warn(
+            f"Plant data failed schema check! Writing bad data to failed/{file}"
+        )
+        error_writer.write(data, file)
+        raise e
+
+    return data
 
 
+# downstream assets managed by dbt
 dbt_assets = load_assets_from_dbt_project(
     project_dir="dbt_project", profiles_dir="dbt_project/config"
 )
 
-# OPTION 3: PARTITIONS
-@asset(
-    partitions_def=DailyPartitionsDefinition(start_date="2023-01-20"),
-    io_manager_key="warehouse_io_manager",
-    metadata={'partition_expr': 'date'},
-    key_prefix=["vehicles"],
-    group_name="partitions"
-)
-def plant_data_partitioned(context, file_reader: FileReader): 
-    partition =  context.asset_partition_key_for_output()
-    if partition == "2023-01-20":
-        file = "parts.csv"
-    elif partition == "2023-01-22":
-        file = "bad_parts.csv"
-    else:
-        file = None
-    data = file_reader.read(file)
-    return data
-
 # --- Jobs
 asset_job = define_asset_job(
     name="new_plant_data_job",
-    selection=AssetSelection.all() - AssetSelection.assets(plant_data),
+    selection=AssetSelection.all(),
+    partitions_def=DailyPartitionsDefinition(start_date="2023-01-20"),
 )
 
 # --- Sensors
 @sensor(job=asset_job)
 def watch_for_new_plant_data(context):
+    """Sensor watches for new data files to be processed"""
 
-    ls = DirectoryLister()
+    ls = sensor_resources[get_env()]
     cursor = context.cursor or None
     already_seen = set()
     if cursor is not None:
         already_seen = set(ast.literal_eval(cursor))
 
-    files = set(ls.list("data"))
+    files = set(ls.list())
     new_files = files - already_seen
 
     if len(new_files) == 0:
         return SkipReason("No new files to process")
 
     run_requests = [
-        RunRequest(
-            run_key=file,
-            run_config={
-                "ops": {
-                     "plant_data_conditional": {
-                                "config": {"file": f"data/{file}"}
-                            }
-                    }
-                }
+        asset_job.run_request_for_partition(
+            partition_key=file.replace(".csv", ""), run_key=file
         )
         for file in new_files
     ]
@@ -182,7 +162,7 @@ def watch_for_new_plant_data(context):
 
 
 defs = Definitions(
-    assets=[plant_data_conditional, plant_data, plant_data_partitioned, *dbt_assets],
+    assets=[plant_data, *dbt_assets],
     resources=resources[get_env()],
     jobs=[asset_job],
     sensors=[watch_for_new_plant_data],
