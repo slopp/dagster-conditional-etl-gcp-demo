@@ -11,7 +11,11 @@ This project is an example of using Dagster to conditionally write new data to a
 
 To install the dependencies and run Dagster:
 
-```
+```bash
+# necessary for the dbt profile to load
+export GCP_BQ_DATASET="none"
+export GCP_BQ_PROJECT="none"
+
 pip install -e ".[dev]"
 dagster dev
 ```
