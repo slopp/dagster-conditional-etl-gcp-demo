@@ -2,6 +2,7 @@ import ast
 import base64
 import json
 import os
+import pandas as pd
 
 from dagster import (
     AssetSelection,
@@ -11,7 +12,13 @@ from dagster import (
     asset,
     define_asset_job,
     sensor,
+    multi_asset, 
+    AssetOut,
+    Output, 
+    RunRequest,
+    AssetIn
 )
+from dagster._config.structured_config import Config
 from dagster_dbt import dbt_cli_resource, load_assets_from_dbt_project
 from dagster_duckdb_pandas import duckdb_pandas_io_manager
 from pandera import Check, Column, DataFrameSchema
@@ -20,10 +27,10 @@ from pandera.errors import SchemaError
 from .resources import (
     BQIOManager,
     DirectoryLister,
-    ErrorWriter,
+    ErrorIOWriter,
     FileReader,
     GCPDirectoryLister,
-    GCPErrorWriter,
+    GCPErrorIOWriter,
     GCPFileReader,
 )
 
@@ -51,7 +58,7 @@ def get_env():
 resources = {
     "LOCAL": {
         "file_reader": FileReader(directory="data"),
-        "error_writer": ErrorWriter(directory="failed"),
+        "error_writer": ErrorIOWriter(directory="failed"),
         "warehouse_io_manager": duckdb_pandas_io_manager.configured(
             {"database": "example.duckdb"}
         ),
@@ -61,7 +68,7 @@ resources = {
     },
     "GCP": {
         "file_reader": GCPFileReader(bucket="gcs://hooli-demo"),
-        "error_writer": GCPErrorWriter(bucket="gcs://hooli-demo", folder="failed"),
+        "error_writer": GCPErrorIOWriter(bucket="gcs://hooli-demo", folder="failed"),
         "warehouse_io_manager": BQIOManager(dataset=os.getenv("GCP_BQ_DATASET")),
         "dbt": dbt_cli_resource.configured(
             {
@@ -78,26 +85,35 @@ sensor_resources = {
     "GCP": GCPDirectoryLister(bucket="hooli-demo", ignore_folder="failed"),
 }
 
+
+class FileToLoad(Config):
+    file: str
+
+@asset
+def plant_data_loaded(context, config: FileToLoad, file_reader: FileReader) -> pd.DataFrame:
+    data = file_reader.read(config.file)
+    context.add_output_metadata(
+        {
+            "load_from": config.file
+        }
+    )
+    return data
+
 # --- Assets
-@asset(
-    io_manager_key="warehouse_io_manager",
-    partitions_def=DailyPartitionsDefinition(start_date="2023-01-20"),
-    metadata={"partition_expr": "date"},
-    key_prefix=["vehicles"],
-    group_name="vehicles",
+@multi_asset(
+    outs={
+        "plant_data_good": AssetOut(is_required=False, io_manager_key="warehouse_io_manager", group_name="success_pipeline"),
+        "plant_data_bad": AssetOut(is_required=False, io_manager_key="error_writer", group_name="failure_pipeline"),
+    }
 )
-def plant_data(context, file_reader: FileReader, error_writer: ErrorWriter):
+def plant_data_conditional(context, plant_data_loaded):
+    """ 
+        The loaded data is checked against a schema
+        If the checks pass, the data is passed through to the asset "plant_data_good"
+        If the checks fail, the data is passed through to the asset "plant_data_bad" 
+    
     """
-    Plant data that matches a schema requirement
-
-    Raw data is read from directory, 1 file per day
-    These daily files are represented as partitions
-
-    If data fails the schema check the partition fails
-    which can trigger an alert and writes the bad data
-    to a failed location
-    """
-
+    
     PlantDataSchema = DataFrameSchema(
         {
             "plant": Column(str),
@@ -107,62 +123,88 @@ def plant_data(context, file_reader: FileReader, error_writer: ErrorWriter):
         }
     )
 
-    file = f"{context.asset_partition_key_for_output()}.csv"
-    data = file_reader.read(file)
 
     try:
-        PlantDataSchema.validate(data)
+        PlantDataSchema.validate(plant_data_loaded)
+        yield Output(plant_data_loaded, "plant_data_good", metadata={"schema_check": "Passed Validation"} )  
     except SchemaError as e:
-        context.log.warn(
-            f"Plant data failed schema check! Writing bad data to failed/{file}"
-        )
-        error_writer.write(data, file)
-        raise e
+        context.log.warn("Plant data failed schema check!")
+        yield Output(plant_data_loaded, "plant_data_bad", metadata={"schema_check": f"Failed Validation with {str(e)}"})
 
-    return data
+@asset(
+    group_name="success_pipeline",
+    io_manager_key="warehouse_io_manager",
+    key_prefix="vehicles"
+)
+def plant_data(plant_data_good: pd.DataFrame) -> pd.DataFrame:
+    """ Processes the data that passed validation """
+    plant_data_good['schema'] = '0.1'
+    # other side affects like logging to run table go here!
+
+    # this returned plant_data_good dataframe is written to 
+    # a plant_data table using the warehouse io manager
+    # and then that table is used as a dbt source 
+    return plant_data_good
+
+@asset(
+    group_name="failure_pipeline",
+    io_manager_key="error_writer"
+)
+def bad_data_queue(plant_data_bad: pd.DataFrame) -> pd.DataFrame:
+    """ Processes the data that failed validation """
+    # side affects like paging the team or writing to a failure queue go here!
+
+    # the plant data bad is written to a directory / bucket using the error writer 
+    plant_data_bad['schema_failed'] = '0.1'
+    return plant_data_bad
 
 
 # downstream assets managed by dbt
 dbt_assets = load_assets_from_dbt_project(
-    project_dir="dbt_project", profiles_dir="dbt_project/config"
+    project_dir="dbt_project", 
+    profiles_dir="dbt_project/config"
 )
 
 # --- Jobs
 asset_job = define_asset_job(
     name="new_plant_data_job",
-    selection=AssetSelection.all(),
-    partitions_def=DailyPartitionsDefinition(start_date="2023-01-20"),
+    selection=AssetSelection.all()
 )
 
 # --- Sensors
 @sensor(job=asset_job)
 def watch_for_new_plant_data(context):
-    """Sensor watches for new data files to be processed"""
+    """Sensor watches for new or updated data files to be processed"""
 
     ls = sensor_resources[get_env()]
-    cursor = context.cursor or None
-    already_seen = set()
-    if cursor is not None:
-        already_seen = set(ast.literal_eval(cursor))
 
-    files = set(ls.list())
-    new_files = files - already_seen
+    file_mtimes = ls.list()
 
-    if len(new_files) == 0:
-        return SkipReason("No new files to process")
+    # dagster sensors launch, at most, one run for each unique run_key
+    # by using the file_name:mtime as the run_key, this means each file 
+    # will be processed once per update
+    # files that have already been processed will have a RunRequest that is skipped
+    # https://docs.dagster.io/concepts/partitions-schedules-sensors/sensors#idempotence-using-run-keys
 
     run_requests = [
-        asset_job.run_request_for_partition(
-            partition_key=file.replace(".csv", ""), run_key=file
-        )
-        for file in new_files
+          RunRequest(
+            run_key=f"{file['name']}_{file['mtime']}",
+            run_config={
+                "ops": {
+                     "plant_data_loaded": {
+                                "config": {"file": f"{file['name']}"}
+                            }
+                    }
+                }
+          )
+          for file in file_mtimes
     ]
-    context.update_cursor(str(files))
+    
     return run_requests
 
 
 defs = Definitions(
-    assets=[plant_data, *dbt_assets],
+    assets=[plant_data, *dbt_assets, plant_data_conditional, plant_data_loaded, bad_data_queue],
     resources=resources[get_env()],
     jobs=[asset_job],
     sensors=[watch_for_new_plant_data],

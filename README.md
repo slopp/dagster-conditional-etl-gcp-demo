@@ -26,41 +26,9 @@ You will see the sensor launch two runs, one for the file `data/2023-01-20.csv` 
 
 The run for `data/2023-01-20.csv` will parse the data and pass the data checks. As a result, the data will be written to a warehouse and then downstream dbt assets will run to transform the data and create a summary table.
 
-The run for `data/2023-01-23.csv` will fail the data checks. As a result, the data will be written to a failure location and a warning will be logged. In production the failed run will trigger an email alert.
+The run for `data/2023-01-23.csv` will fail the data checks. As a result, the data will be written to a failure location and a warning will be logged. In production the failed run could trigger an email alert.
 
-## Think declaratively 
-
-In an task-based orchestrator the pipeline is represented as a series of complex branched steps:
-
-- First, load the data 
-- Second, check data expectations 
-- Third, if the data fails expectations, write the data to a failure location 
-- Fourth, if the data meets expectations, write the data to a success location 
-- Fifth, if the data met expectations, run a transformation pipeline   
-
-![](tasks.png)
-
-This task-based specification is verbose and makes debugging challenging. In order to understand the state of the dataset you have to inspect the logs for each run and determine which path was taken. 
-
-In Dagster, assets allow the pipeline to be represented in terms of the outputs:  
-
-- The raw dataset, with each data file represented as a partition  
-- The transformed dataset  
-- The cleaned summary dataset 
-
-![](assets.png)
-
-Lineage between the upstream and downstream assets is obvious. The code responsible for creating the raw dataset can still have conditional behavior. However, unlike the task-based approach, the result of the conditional logic is represented immediately in the state of the asset. Teams can see what partitions of the asset are successful as well as which partitions are missing. 
-
-![](asset_view.png)
-
-When failures do occur, side affects can still occur such as alerting the team or writing the failed data to a separate queue.
-
-![](runs.png)
-
-![](handling_failure.png)
-
-Finally, Dagster assets support a resource abstraction. Resources allow the code responsible for loading and storing data to be decoupled from the pipeline code. Decoupling resources enables different resources to be used for local testing vs production runs.
+![](assets_branches.png)
 
 ## Use resources
 

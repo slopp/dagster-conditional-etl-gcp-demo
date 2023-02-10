@@ -16,22 +16,34 @@ class FileReader(Resource):
         return pd.read_csv(f"{self.directory}/{file}")
 
 
-class ErrorWriter(Resource):
+class ErrorIOWriter(StructuredConfigIOManager):
     """Writes failed dataframes to a specific folder"""
 
     directory: Optional[str]
 
-    def write(self, obj: pd.DataFrame, file: str):
+    def handle_output(self, context, obj: pd.DataFrame):
+        file = context.asset_key.path[-1]
         return obj.to_csv(f"{self.directory}/{file}")
+
+    def load_input(self, context) -> pd.DataFrame:
+        file = context.asset_key.path[-1]        
+        return pd.read_csv(f"{self.directory}/{file}")
 
 
 class DirectoryLister(Resource):
-    """Lists files in a directory"""
+    """Returns a list of dicts with file name and mtime for all files in a directory"""
 
     directory: Optional[str]
 
     def list(self):
-        return os.listdir(self.directory)
+        files_mtimes = [
+            {
+            "name": file, 
+            "mtime": os.path.getmtime(f"{self.directory}/{file}")
+            } 
+         for file in os.listdir(self.directory)
+        ]
+        return files_mtimes
 
 
 class GCPFileReader(FileReader):
@@ -43,19 +55,24 @@ class GCPFileReader(FileReader):
         return pd.read_csv(f"{self.bucket}/{file}")
 
 
-class GCPErrorWriter(ErrorWriter):
+class GCPErrorIOWriter(StructuredConfigIOManager):
     """Writes failed dataframes to a GCS bucket in a specific folder"""
 
     bucket: str
     folder: str
 
-    def write(self, obj: pd.DataFrame, file: str):
+    def handle_output(self, context, obj: pd.DataFrame):
+        file = context.asset_key.path[-1]
         obj.to_csv(f"{self.bucket}/{self.folder}/{file}")
         return
 
+    def load_input(self, context) -> pd.DataFrame:
+        file = context.asset_key.path[-1]
+        return pd.read_csv(f"{self.bucket}/{self.folder}/{file}")
+
 
 class GCPDirectoryLister(DirectoryLister):
-    """Lists blobs in a GCS bucket except any files in an ignored folder"""
+    """Returns a list of dicts with file name and mtime for all files in a bucket except those in an ignored folder"""
 
     bucket: str
     ignore_folder: str
@@ -63,12 +80,21 @@ class GCPDirectoryLister(DirectoryLister):
     def list(self):
         storage_client = storage.Client()
         blobs = storage_client.list_blobs(self.bucket)
-        files = []
+
+        files_mtimes = []
+
         for blob in blobs:
             if self.ignore_folder in blob.name:
                 continue
-            files.append(blob.name)
-        return files
+            
+            files_mtimes.append(
+                {
+                    "name": blob.name,
+                    "mtime": str(blob.updated)
+                }
+            )
+            
+        return files_mtimes
 
 
 class BQIOManager(StructuredConfigIOManager):
@@ -87,5 +113,5 @@ class BQIOManager(StructuredConfigIOManager):
         return
 
     def load_input(self, context) -> pd.DataFrame:
-        # TODO
-        pass
+        dataset_table = f"{self.dataset}.{context.asset_key.path[-1]}"
+        return pandas_gbq.read_gbq(f"SELECT * FROM {dataset_table}")
